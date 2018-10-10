@@ -2,6 +2,7 @@ from __future__ import absolute_import, division, print_function
 
 import functools
 import inspect
+import itertools
 import sys
 import warnings
 from collections import OrderedDict, deque, defaultdict
@@ -462,7 +463,10 @@ class FixtureRequest(FuncargnamesCompatAttr):
     def _fillfixtures(self):
         item = self._pyfuncitem
         fixturenames = getattr(item, "fixturenames", self.fixturenames)
-        for argname in fixturenames:
+        usefixtures = flatten(
+            mark.args for mark in item.iter_markers(name="usefixtures")
+        )
+        for argname in itertools.chain(fixturenames, usefixtures):
             if argname not in item.funcargs:
                 item.funcargs[argname] = self.getfixturevalue(argname)
 
