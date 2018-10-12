@@ -2,7 +2,6 @@ from __future__ import absolute_import, division, print_function
 
 import functools
 import inspect
-import itertools
 import sys
 import warnings
 from collections import OrderedDict, deque, defaultdict
@@ -122,7 +121,10 @@ def add_funcarg_pseudo_fixture_def(collector, metafunc, fixturemanager):
     # collect funcargs of all callspecs into a list of values
     arg2params = {}
     arg2scope = {}
+    print(metafunc.definition.name)
     for callspec in metafunc._calls:
+        print("Callspec ID: %s" % callspec.id)
+        print("Funcargs: %s" % str(callspec.funcargs))
         for argname, argvalue in callspec.funcargs.items():
             assert argname not in callspec.params
             callspec.params[argname] = argvalue
@@ -166,6 +168,7 @@ def add_funcarg_pseudo_fixture_def(collector, metafunc, fixturemanager):
             arg2fixturedefs[argname] = [fixturedef]
             if node is not None:
                 node._name2pseudofixturedef[argname] = fixturedef
+    print(arg2fixturedefs)
 
 
 def getfixturemarker(obj):
@@ -337,6 +340,12 @@ class FuncFixtureInfo(object):
 
         self.names_closure[:] = sorted(closure, key=self.names_closure.index)
 
+    def copy(self):
+        return FuncFixtureInfo(
+            self.argnames, self.initialnames, list(self.names_closure),
+            self.name2fixturedefs.copy(),
+        )
+
 
 class FixtureRequest(FuncargnamesCompatAttr):
     """ A request for a fixture from a test or fixture function.
@@ -463,10 +472,7 @@ class FixtureRequest(FuncargnamesCompatAttr):
     def _fillfixtures(self):
         item = self._pyfuncitem
         fixturenames = getattr(item, "fixturenames", self.fixturenames)
-        usefixtures = flatten(
-            mark.args for mark in item.iter_markers(name="usefixtures")
-        )
-        for argname in itertools.chain(fixturenames, usefixtures):
+        for argname in fixturenames:
             if argname not in item.funcargs:
                 item.funcargs[argname] = self.getfixturevalue(argname)
 
@@ -1159,13 +1165,13 @@ class FixtureManager(object):
             argnames = getfuncargnames(func, cls=cls)
         else:
             argnames = ()
-        usefixtures = flatten(
-            mark.args for mark in node.iter_markers(name="usefixtures")
-        )
-        initialnames = tuple(usefixtures) + argnames
+        #usefixtures = flatten(
+        #    mark.args for mark in node.iter_markers(name="usefixtures")
+        #)
+        #initialnames = tuple(usefixtures) + argnames
         fm = node.session._fixturemanager
         initialnames, names_closure, arg2fixturedefs = fm.getfixtureclosure(
-            initialnames, node
+            argnames, node,
         )
         return FuncFixtureInfo(argnames, initialnames, names_closure, arg2fixturedefs)
 
@@ -1244,8 +1250,8 @@ class FixtureManager(object):
         fixturenames_closure.sort(key=sort_by_scope)
         return initialnames, fixturenames_closure, arg2fixturedefs
 
-    def pytest_generate_tests(self, metafunc):
-        for argname in metafunc.fixturenames:
+    def pytest_usefixtures(self, metafunc, fixturenames):
+        for argname in fixturenames:
             faclist = metafunc._arg2fixturedefs.get(argname)
             if faclist:
                 fixturedef = faclist[-1]
@@ -1270,8 +1276,11 @@ class FixtureManager(object):
                             scope=fixturedef.scope,
                             ids=fixturedef.ids,
                         )
-            else:
-                continue  # will raise FixtureLookupError at setup time
+
+    def pytest_apply_marker(self, metafunc, marker):
+        if marker.name != "usefixtures":
+            return
+        metafunc.usefixtures(*marker.args)
 
     def pytest_collection_modifyitems(self, items):
         # separate parametrized setups

@@ -296,6 +296,14 @@ def pytest_generate_tests(metafunc):
     """ generate (multiple) parametrized calls to a test function."""
 
 
+def pytest_apply_marker(metafunc, marker):
+    """  apply the given markers to the metafunc."""
+
+
+def pytest_usefixtures(metafunc, fixturenames):
+    """  add the given fixtures to the metafunc."""
+
+
 @hookspec(firstresult=True)
 def pytest_make_parametrize_id(config, val, argname):
     """Return a user-friendly string representation of the given ``val`` that will be used

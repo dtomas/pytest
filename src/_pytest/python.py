@@ -12,6 +12,7 @@ from textwrap import dedent
 
 import py
 import six
+from more_itertools import flatten
 from _pytest.main import FSHookProxy
 from _pytest.mark import MarkerError
 from _pytest.config import hookimpl
@@ -153,16 +154,26 @@ def pytest_cmdline_main(config):
         return 0
 
 
-def pytest_generate_tests(metafunc):
-    # those alternative spellings are common - raise a specific error to alert
-    # the user
+#def pytest_generate_tests(metafunc):
+#    # those alternative spellings are common - raise a specific error to alert
+#    # the user
+#    alt_spellings = ["parameterize", "parametrise", "parameterise"]
+#    for attr in alt_spellings:
+#        if hasattr(metafunc.function, attr):
+#            msg = "{0} has '{1}', spelling should be 'parametrize'"
+#            raise MarkerError(msg.format(metafunc.function.__name__, attr))
+#    for marker in metafunc.definition.iter_markers(name="parametrize"):
+#        metafunc.parametrize(*marker.args, **marker.kwargs)
+
+
+def pytest_apply_marker(metafunc, marker):
     alt_spellings = ["parameterize", "parametrise", "parameterise"]
-    for attr in alt_spellings:
-        if hasattr(metafunc.function, attr):
-            msg = "{0} has '{1}', spelling should be 'parametrize'"
-            raise MarkerError(msg.format(metafunc.function.__name__, attr))
-    for marker in metafunc.definition.iter_markers(name="parametrize"):
-        metafunc.parametrize(*marker.args, **marker.kwargs)
+    if marker.name in alt_spellings:
+        msg = "{0} has '{1}', spelling should be 'parametrize'"
+        raise MarkerError(msg.format(metafunc.function.__name__, marker.name))
+    if marker.name != "parametrize":
+        return
+    metafunc.parametrize(*marker.args, **marker.kwargs)
 
 
 def pytest_configure(config):
@@ -422,44 +433,61 @@ class PyCollector(PyobjMixin, nodes.Collector):
         transfer_markers(funcobj, cls, module)
         fm = self.session._fixturemanager
 
-        definition = FunctionDefinition(name=name, parent=self, callobj=funcobj)
+        definition = FunctionDefinition(
+            name=name,
+            parent=self,
+            callobj=funcobj,
+            originalname=name,
+        )
         fixtureinfo = fm.getfixtureinfo(definition, funcobj, cls)
 
         metafunc = Metafunc(
-            definition, fixtureinfo, self.config, cls=cls, module=module
+            definition, fixtureinfo, self.config, cls=cls, module=module,
         )
-        methods = []
-        if hasattr(module, "pytest_generate_tests"):
-            methods.append(module.pytest_generate_tests)
-        if hasattr(cls, "pytest_generate_tests"):
-            methods.append(cls().pytest_generate_tests)
-        if methods:
-            self.ihook.pytest_generate_tests.call_extra(
-                methods, dict(metafunc=metafunc)
-            )
-        else:
-            self.ihook.pytest_generate_tests(metafunc=metafunc)
+        for marker in definition.iter_markers():
+            print("applying marker %s" % marker)
+            metafunc._apply_marker(marker)
+        print("using fixtures %s" % str(metafunc.fixturenames))
+        metafunc._usefixtures(metafunc.fixturenames)
+        metafunc._generate_tests()
 
         Function = self._getcustomclass("Function")
         if not metafunc._calls:
-            yield Function(name, parent=self, fixtureinfo=fixtureinfo)
+            yield Function(name, parent=self, fixtureinfo=metafunc.fixtureinfo)
         else:
-            # add funcargs() as fixturedefs to fixtureinfo.arg2fixturedefs
-            fixtures.add_funcarg_pseudo_fixture_def(self, metafunc, fm)
 
-            # add_funcarg_pseudo_fixture_def may have shadowed some fixtures
-            # with direct parametrization, so make sure we update what the
-            # function really needs.
-            fixtureinfo.prune_dependency_tree()
-
+            print("Calls unprocessed:")
             for callspec in metafunc._calls:
+                call_fixtureinfo = callspec.metafunc.fixtureinfo
                 subname = "%s[%s]" % (name, callspec.id)
+                print(subname)
+                print(callspec.metafunc)
+                print(call_fixtureinfo)
+
+            for call_metafunc in {callspec.metafunc for callspec in metafunc._calls}:
+                call_fixtureinfo = call_metafunc.fixtureinfo
+
+                # add funcargs() as fixturedefs to fixtureinfo.arg2fixturedefs
+                fixtures.add_funcarg_pseudo_fixture_def(self, call_metafunc, fm)
+
+                # add_funcarg_pseudo_fixture_def may have shadowed some fixtures
+                # with direct parametrization, so make sure we update what the
+                # function really needs.
+                call_fixtureinfo.prune_dependency_tree()
+
+            print("Calls:")
+            for callspec in metafunc._calls:
+                call_fixtureinfo = callspec.metafunc.fixtureinfo
+                subname = "%s[%s]" % (name, callspec.id)
+                print(subname)
+                print(callspec.metafunc)
+                print(call_fixtureinfo)
                 yield Function(
                     name=subname,
                     parent=self,
                     callspec=callspec,
                     callobj=funcobj,
-                    fixtureinfo=fixtureinfo,
+                    fixtureinfo=call_fixtureinfo,
                     keywords={callspec.id: True},
                     originalname=name,
                 )
@@ -912,6 +940,8 @@ class Metafunc(fixtures.FuncargnamesCompatAttr):
         #: the module object where the test function is defined in.
         self.module = module
 
+        self.fixtureinfo = fixtureinfo
+
         #: underlying python test function
         self.function = definition.obj
 
@@ -924,6 +954,27 @@ class Metafunc(fixtures.FuncargnamesCompatAttr):
         self._calls = []
         self._ids = set()
         self._arg2fixturedefs = fixtureinfo.name2fixturedefs
+        self._children = set()
+
+    def usefixtures(self, *fixturenames):
+        for metafunc in {self}.union(self._children):
+            print(metafunc.definition.name)
+            print("usefixtures({})".format(fixturenames))
+            initialnames = tuple(self.fixturenames) + tuple(fixturenames) + metafunc.fixtureinfo.argnames
+            fm = metafunc.definition.session._fixturemanager
+            initialnames, names_closure, arg2fixturedefs = fm.getfixtureclosure(
+                initialnames, metafunc.definition,
+            )
+            metafunc.fixtureinfo = fixtures.FuncFixtureInfo(
+                metafunc.fixtureinfo.argnames, initialnames, names_closure, arg2fixturedefs,
+            )
+            metafunc.fixturenames = metafunc.fixtureinfo.names_closure
+            metafunc._arg2fixturedefs = metafunc.fixtureinfo.name2fixturedefs
+            metafunc.definition.fixturenames = metafunc.fixturenames
+            metafunc.definition._fixtureinfo = metafunc.fixtureinfo
+            metafunc.definition._initrequest()
+            print(metafunc.fixturenames)
+            print(metafunc.fixtureinfo)
 
     def parametrize(self, argnames, argvalues, indirect=False, ids=None, scope=None):
         """ Add new invocations to the underlying test function using the list
@@ -965,6 +1016,9 @@ class Metafunc(fixtures.FuncargnamesCompatAttr):
         """
         from _pytest.fixtures import scope2index
         from _pytest.mark import ParameterSet
+        print("parametrize()")
+        print(self.definition.name)
+        print(self.fixtureinfo)
 
         argnames, parameters = ParameterSet._for_parametrize(
             argnames,
@@ -993,6 +1047,7 @@ class Metafunc(fixtures.FuncargnamesCompatAttr):
         for callspec in self._calls or [CallSpec2(self)]:
             for param_index, (param_id, param_set) in enumerate(zip(ids, parameters)):
                 newcallspec = callspec.copy()
+                #newcallspec_copy = newcallspec.copy()
                 newcallspec.setmulti2(
                     arg_values_types,
                     argnames,
@@ -1002,8 +1057,106 @@ class Metafunc(fixtures.FuncargnamesCompatAttr):
                     scopenum,
                     param_index,
                 )
-                newcalls.append(newcallspec)
+                newcallspec.metafunc = self
+                #if not param_set.marks:
+                #    newcalls.append(newcallspec)
+                #    continue
+                # The parametrization definition.
+                param_set_fixtureinfo = callspec.metafunc.fixtureinfo.copy()
+                param_set_definition = FunctionDefinition(
+                    name="{}[{}]".format(callspec.metafunc.definition.originalname, callspec.id),
+                    parent=callspec.metafunc.definition.parent,
+                    callobj=callspec.metafunc.function,
+                    fixtureinfo=param_set_fixtureinfo,
+                    # We're only interested in the parameter set's marks.
+                    # The original definition's marks are contained in the new callspec
+                    # which is added to the parameter set's metafunc below.
+                    #own_markers=param_set.marks,
+                    originalname=callspec.metafunc.definition.originalname,
+                )
+                #fixturenames = param_set_definition.fixturenames
+                #param_set_definition.fixturenames = param_set_definition._fixtureinfo.names_closure = list(
+                #    flatten(
+                #        mark.args for mark in param_set_definition.iter_markers(name="usefixtures")
+                #    )
+                #)
+                #print(param_set_definition.fixturenames)
+                # The metafunc for the parametrization.
+                param_set_metafunc = Metafunc(
+                    param_set_definition,
+                    fixtureinfo=param_set_fixtureinfo,
+                    config=callspec.metafunc.config,
+                    cls=callspec.metafunc.cls,
+                    module=callspec.metafunc.module,
+                )
+                param_set_metafunc.usefixtures(*self.fixturenames)
+                #param_set_metafunc.fixturenames = list(callspec.metafunc.fixturenames)
+                #param_set_metafunc._arg2fixturedefs = callspec.metafunc._arg2fixturedefs.copy()
+                newcallspec.metafunc = param_set_metafunc
+                print("Callspec ID: %s" % callspec.id)
+                print("Callspec Metafunc fixturenames: %s" % str(param_set_metafunc.fixturenames))
+                param_set_metafunc._calls = [newcallspec]
+                # Call the pytest_apply_marker() hook for the parameter set metafunc,
+                # in order to apply its "parametrize" and "usefixtures" marks.
+                for marker in param_set.marks:
+                    param_set_metafunc._apply_marker(marker)
+                param_set_metafunc._usefixtures(tuple(
+                    fixturename for fixturename in param_set_metafunc.fixturenames
+                    if fixturename not in callspec.metafunc.fixturenames
+                ))
+                self._children.add(param_set_metafunc)
+                newcalls += param_set_metafunc._calls
         self._calls = newcalls
+        print("---")
+        print("Metafunc calls:")
+        for call in self._calls:
+            print((call.id, call.metafunc.fixtureinfo))
+
+    def _apply_marker(self, marker):
+        hook_name = "pytest_apply_marker"
+        methods = []
+        if hasattr(self.module, hook_name):
+            methods.append(getattr(self.module, hook_name))
+        if hasattr(self.cls, hook_name):
+            methods.append(getattr(self.cls(), hook_name))
+        if methods:
+            getattr(self.definition.ihook, hook_name).call_extra(
+                methods, dict(metafunc=self, marker=marker)
+            )
+        else:
+            getattr(self.definition.ihook, hook_name)(metafunc=self, marker=marker)
+
+    def _usefixtures(self, fixturenames):
+        hook_name = "pytest_usefixtures"
+        methods = []
+        if hasattr(self.module, hook_name):
+            methods.append(getattr(self.module, hook_name))
+        if hasattr(self.cls, hook_name):
+            methods.append(getattr(self.cls(), hook_name))
+        if methods:
+            getattr(self.definition.ihook, hook_name).call_extra(
+                methods, dict(metafunc=self, fixturenames=fixturenames),
+            )
+        else:
+            getattr(self.definition.ihook, hook_name)(
+                metafunc=self, fixturenames=fixturenames,
+            )
+
+    def _generate_tests(self, recursive=False):
+        hook_name = "pytest_generate_tests"
+        if recursive:
+            hook_name += "_recursive"
+        methods = []
+        if hasattr(self.module, hook_name):
+            methods.append(getattr(self.module, hook_name))
+        if hasattr(self.cls, hook_name):
+            methods.append(getattr(self.cls(), hook_name))
+        if methods:
+            getattr(self.definition.ihook, hook_name).call_extra(
+                methods, dict(metafunc=self)
+            )
+        else:
+            getattr(self.definition.ihook, hook_name)(metafunc=self)
 
     def _resolve_arg_ids(self, argnames, ids, parameters, item):
         """Resolves the actual ids for the given argnames, based on the ``ids`` parameter given
@@ -1376,6 +1529,7 @@ class Function(FunctionMixin, nodes.Item, fixtures.FuncargnamesCompatAttr):
         self,
         name,
         parent,
+        own_markers=None,
         args=None,
         config=None,
         callspec=None,
@@ -1391,7 +1545,10 @@ class Function(FunctionMixin, nodes.Item, fixtures.FuncargnamesCompatAttr):
             self.obj = callobj
 
         self.keywords.update(self.obj.__dict__)
-        self.own_markers.extend(get_unpacked_marks(self.obj))
+        if own_markers is not None:
+            self.own_markers = list(own_markers)
+        else:
+            self.own_markers.extend(get_unpacked_marks(self.obj))
         if callspec:
             self.callspec = callspec
             # this is total hostile and a mess

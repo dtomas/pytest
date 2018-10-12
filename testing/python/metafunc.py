@@ -23,9 +23,13 @@ class TestMetafunc(object):
             def __init__(self, names):
                 self.names_closure = names
 
+            def copy(self):
+                return FixtureInfo(self.names_closure)
+
         @attr.s
         class DefinitionMock(object):
             obj = attr.ib()
+            name = originalname = "mock"
 
         names = fixtures.getfuncargnames(func)
         fixtureinfo = FixtureInfo(names)
